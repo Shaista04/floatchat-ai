@@ -1,7 +1,19 @@
+"""
+Validate ARGO data ingestion — checks MongoDB collections, indexes, and sample data.
+
+Usage (run from ANY directory):
+    python /path/to/floatchat-ai/tests/validate_ingestion.py
+    python tests/validate_ingestion.py               # from project root
+"""
 import pymongo
 from pymongo import MongoClient
 import os
 import sys
+
+# Auto-detect project root and add to sys.path (works from any directory)
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 def validate_ingestion():
     mongo_uri = os.environ.get("MONGO_URI", "mongodb://localhost:27017")

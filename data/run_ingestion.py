@@ -2,17 +2,26 @@
 """
 CLI entry point for the ARGO data ingestion pipeline.
 
-Usage:
-    python run_ingestion.py                         # Full ingestion
-    python run_ingestion.py --limit 100             # Ingest first 100 files only
-    python run_ingestion.py --batch-size 250        # Smaller batches
-    python run_ingestion.py --workers 2             # Fewer workers
-    python run_ingestion.py --db floatchat_test      # Different database name
+Usage (run from ANY directory):
+    python /path/to/floatchat-ai/data/run_ingestion.py
+    python -m data.run_ingestion                      # from project root
+
+Options:
+    python data/run_ingestion.py --limit 100           # Ingest first 100 files only
+    python data/run_ingestion.py --batch-size 250      # Smaller batches
+    python data/run_ingestion.py --workers 2           # Fewer workers
+    python data/run_ingestion.py --db floatchat_test    # Different database name
 """
 
 import argparse
 import logging
 import sys
+import os
+
+# Auto-detect project root and add to sys.path (works from any directory)
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from data.ingestion import ArgoIngestionPipeline
 from data.config import BASE_DATA_DIR, BATCH_SIZE, NUM_WORKERS, DATABASE_NAME

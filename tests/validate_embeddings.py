@@ -2,6 +2,10 @@
 """
 Test Embeddings — Verifies the ChromaDB vector store.
 
+Usage (run from ANY directory):
+    python /path/to/floatchat-ai/tests/validate_embeddings.py
+    python tests/validate_embeddings.py              # from project root
+
 Checks:
   1. Collection document counts match expected counts
   2. Document summaries and metadata are well-formed
@@ -10,11 +14,14 @@ Checks:
 """
 
 import sys
+import os
 import logging
 from pathlib import Path
 
-# Add project root to path so we can import vector_db
-sys.path.append(str(Path(__file__).parent.parent))
+# Auto-detect project root and add to sys.path (works from any directory)
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from vector_db.vector_store import ArgoVectorStore
 

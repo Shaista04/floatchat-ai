@@ -1,0 +1,12 @@
+**/__pycache__
+.venv
+*.log
+incois_data
+chroma_data
+arch.md
+explanation.md
+walkthrough.md
+mcp_tools.md
+viz_output
+incoise_data.zip
+suggestions.txt
