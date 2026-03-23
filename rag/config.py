@@ -9,4 +9,4 @@ VENV_PYTHON = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".ve
 MCP_SERVER_SCRIPT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "mcp_server", "server.py"))
 
 # ReAct loop
-MAX_ITERATIONS = 8
+MAX_ITERATIONS = 12

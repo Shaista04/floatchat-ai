@@ -31,7 +31,7 @@ class RagPipeline:
             model=LLM_MODEL,
             base_url=OLLAMA_BASE_URL,
             temperature=0.0,
-            num_predict=200,
+            num_predict=400,
             stop=[
                 "Observation:",
                 "Observation :",

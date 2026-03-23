@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>User CRUD UI</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="container">
+<h1>User Manager</h1>
+<div class="form">
+<input type="text" id="name" placeholder="Enter Name">
+<input type="email" id="email" placeholder="Enter Email">
+<button id="addBtn">Add User</button>
+<button id="updateBtn" style="display:none;">Update</button>
+</div>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Email</th>
+<th>Actions</th>
+</tr>
+</thead>
+<tbody id="userTable"></tbody>
+</table>
+</div>
+<script src="script.js"></script>
+</body>
+</html>
