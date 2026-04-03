@@ -82,7 +82,7 @@ class RagService {
     console.log(`\n[RAG] ═══ New Query: "${query}" ═══`);
 
     // ── 1. Save user message ──────────────────────────────────────────
-    if (sessionId && userId) {
+    if (sessionId) {
       await this.mongoService
         .saveMessage(sessionId, "user", query)
         .catch(() => {});
@@ -91,11 +91,14 @@ class RagService {
     // ── 2. Load conversation history for context ──────────────────────
     const history = await this._loadHistory(sessionId);
 
-    // ── 3. Parallel: Vector Search + LLM Intent Classification ────────
-    const [vectorContext, intent] = await Promise.all([
-      this._vectorSearch(query),
-      this._classifyIntent(query, history),
-    ]);
+    // ── 3. Classify intent first, then choose MCP or vector path ──────
+    const intent = this._normalizeIntent(
+      query,
+      await this._classifyIntent(query, history),
+    );
+    const vectorContext = this._shouldUseVectorSearch(intent, query)
+      ? await this._vectorSearch(query)
+      : [];
 
     console.log(
       `[RAG] Intent: tool=${intent.tool}, llmConnected=${intent.llmConnected}`,
@@ -177,7 +180,7 @@ class RagService {
         .saveMessage(sessionId, "ai", answer, toolCode, {
           toolResult,
           toolUsed: intent.tool,
-          intentInfo: intentMessage,
+          intentInfo: intent,
         })
         .catch(() => {});
     }
@@ -209,6 +212,10 @@ class RagService {
   // ─── Vector Search ──────────────────────────────────────────────────
 
   async _vectorSearch(query) {
+    if (this._shouldSkipVectorSearch(query)) {
+      return [];
+    }
+
     try {
       const results = await this.vectorService.search(query, 12);
       return Array.isArray(results) ? results : [];
@@ -259,6 +266,7 @@ SPECIFIC TOOL ROUTING:
 - "most recent profiles" / "latest profiles" → get_recent_profiles
 - "find floats near X" / "floats within Xkm of" → nearest_floats
 - "find profiles in [region]" (natural language search) → search_profiles
+- "temperature/salinity/oxygen recorded on [date]" → search_profiles
 - "find BGC profiles" / "dissolved oxygen" / "chlorophyll" profiles → search_bgc_profiles
 - "average/mean/statistics for [param]" (global or depth range) → aggregate_statistics
 - "statistics for float X" / "stats for platform X" → get_stats_card
@@ -269,6 +277,7 @@ SPECIFIC TOOL ROUTING:
 - "vertical gradient" / "thermocline" → get_vertical_gradient
 - "trajectory" / "track" / "path of float" → visualize_trajectory
 - "depth profile" / "plot temperature vs depth" → visualize_depth_profile
+- "plot temperature/salinity/oxygen recorded on [date]" → visualize_profiles_by_date
 - "T-S diagram" / "temperature vs salinity" → visualize_ts_diagram
 - "time series" / "changes over time" → visualize_time_series
 - "show on map" / "map of floats" → visualize_float_map
@@ -290,7 +299,7 @@ SPECIFIC TOOL ROUTING:
         tools: this.mcpService.getToolSchemas(),
         tool_choice: "auto",
         temperature: 0.1,
-        max_tokens: 1024,
+        max_tokens: 400,
       });
 
       const msg = response.choices[0]?.message;
@@ -354,8 +363,25 @@ SPECIFIC TOOL ROUTING:
     const platform = platformMatch
       ? platformMatch[1] || platformMatch[2]
       : null;
+    const explicitDateRange = this._extractExplicitDateRange(q);
+    const relativeDateRange = this._extractRelativeDateRange(q);
+    const dateRange = explicitDateRange || relativeDateRange;
+    const region = this._extractRegion(q);
+    const bbox = region || undefined;
 
     // Visualization detection
+    if (
+      /\b(plot|chart|graph|visuali[sz]e|show)\b/i.test(q) &&
+      dateRange
+    ) {
+      const param = this._extractParam(q);
+      return {
+        tool: "visualize_profiles_by_date",
+        params: { ...dateRange, ...(bbox || {}), param },
+        llmConnected: false,
+        llmReasoning: "",
+      };
+    }
     if (/\b(t-?s\s*diagram|temperature.*(vs|versus|salinity))\b/i.test(q)) {
       return {
         tool: "visualize_ts_diagram",
@@ -400,7 +426,6 @@ SPECIFIC TOOL ROUTING:
       };
     }
     if (/\b(map|show.*float|where.*float|location)\b/i.test(q)) {
-      const region = this._extractRegion(q);
       return {
         tool: "visualize_float_map",
         params: region || {},
@@ -433,7 +458,19 @@ SPECIFIC TOOL ROUTING:
     if (/\b(table|list|tabular|grid|all\s*float)\b/i.test(q)) {
       return {
         tool: "get_data_table",
-        params: platform ? { platform } : {},
+        params: platform
+          ? { platform }
+          : dateRange
+            ? { ...dateRange, ...(bbox || {}), param: this._extractParam(q) }
+            : {},
+        llmConnected: false,
+        llmReasoning: "",
+      };
+    }
+    if (dateRange) {
+      return {
+        tool: "search_profiles",
+        params: { ...dateRange, ...(bbox || {}), param: this._extractParam(q) },
         llmConnected: false,
         llmReasoning: "",
       };
@@ -498,19 +535,15 @@ SPECIFIC TOOL ROUTING:
         const messages = [
           {
             role: "system",
-            content: `You are FloatChat-AI, a friendly, knowledgeable, and thorough oceanographic data assistant. You specialize in ARGO float data from the Indian Ocean.
+            content: `You are FloatChat-AI, an oceanographic data assistant for the Indian Ocean ARGO dataset.
 
 You have access to ${dataSummary} in your database.
 
 RESPONSE GUIDELINES:
-- Give elaborate, detailed, scientifically accurate responses
-- When discussing ocean phenomena, provide context about why they matter
-- Use proper formatting with headers, bullet points, and emphasis
-- If the user asks about your capabilities, explain them comprehensively
-- Reference specific data from the ARGO Indian Ocean dataset when relevant
-- Maintain conversational context — remember what was discussed earlier
-- Suggest follow-up queries the user might find interesting
-- Be warm, helpful, and professional${contextStr}`,
+- Keep the reply short and direct
+- Prefer 3 to 6 lines
+- Give only the most useful answer, not a long explanation
+- Use dataset context only when it helps answer the question${contextStr}`,
           },
           ...history.slice(-6),
           { role: "user", content: query },
@@ -519,8 +552,8 @@ RESPONSE GUIDELINES:
         const response = await this.llm.chat.completions.create({
           model: this.model,
           messages,
-          temperature: 0.7,
-          max_tokens: 1500,
+          temperature: 0.4,
+          max_tokens: 350,
         });
 
         return response.choices[0]?.message?.content || this._defaultGreeting();
@@ -544,6 +577,11 @@ RESPONSE GUIDELINES:
     if (!toolResult) return this._smartFallback(query, intent, toolResult);
 
     const dataContext = this._buildDataContext(toolResult);
+    const isTableResponse = toolResult?.type === "data_table";
+
+    if (isTableResponse) {
+      return this._summarizeTableResult(toolResult, intent);
+    }
 
     if (this.llm) {
       try {
@@ -560,20 +598,16 @@ RESPONSE GUIDELINES:
         const messages = [
           {
             role: "system",
-            content: `You are FloatChat-AI, an expert oceanographic data analyst providing comprehensive analysis of ARGO float data.
+            content: `You are FloatChat-AI, an expert oceanographic data assistant.
 
-You executed a tool and have real data to analyze. Provide a thorough, scientifically insightful response.
+You executed a tool and have real data to summarize.
 
 RESPONSE GUIDELINES:
-- Give detailed, elaborate analysis — don't just state numbers, interpret them
-- For visualizations: describe what the chart/map reveals, identify patterns, and explain their oceanographic significance
-- For data: summarize key findings with specific numbers, compare to known ranges, note any anomalies
-- For statistics: interpret values in oceanographic context (e.g., "typical salinity for the Arabian Sea is 35-36 PSU")
-- Use proper markdown formatting with headers, bullet points, and emphasis
-- Include scientific context about the parameters being analyzed
-- Suggest related queries the user might want to explore next
-- Reference the specific tool used and parameters to show transparency
-- Maintain conversation context from previous messages`,
+- Keep the reply concise
+- Prefer 4 to 8 lines
+- Focus on the key result only
+- Avoid long background explanations or follow-up suggestions
+- Mention the tool result clearly and briefly`,
           },
           ...history.slice(-4),
           {
@@ -590,18 +624,12 @@ RESPONSE GUIDELINES:
           model: this.model,
           messages,
           temperature: 0.4,
-          max_tokens: 2000,
+          max_tokens: 450,
         });
 
         const summary = response.choices[0]?.message?.content;
         if (summary && summary.trim().length > 10) {
-          if (toolResult?.type === "data_table") {
-            return (
-              `${this._cleanLLMResponse(summary)}\n\n` +
-              "The interactive table is displayed below."
-            );
-          }
-          return `${this._cleanLLMResponse(summary)}\n\nData:\n${structuredData}`;
+          return `${this._cleanLLMResponse(summary)}\n\nData:\n${dataContext}`;
         }
       } catch (e) {
         console.warn("[RAG] LLM synthesis failed:", e.message);
@@ -609,6 +637,46 @@ RESPONSE GUIDELINES:
     }
 
     return this._smartFallback(query, intent, toolResult);
+  }
+
+  _summarizeTableResult(toolResult, intent) {
+    const rows = toolResult?.rows || [];
+    if (!rows.length) {
+      return "No matching records found.\nThe interactive table is displayed below.";
+    }
+
+    const lines = [];
+    const params = intent?.params || {};
+    const requestedParam = String(params.param || "").toUpperCase();
+    const paramKey = requestedParam ? requestedParam.toLowerCase() : "";
+
+    lines.push(`${rows.length} record(s) matched your query.`);
+
+    if (params.date_start && params.date_end) {
+      lines.push(
+        params.date_start === params.date_end
+          ? `Date: ${params.date_start}`
+          : `Date range: ${params.date_start} to ${params.date_end}`,
+      );
+    }
+
+    if (requestedParam && rows[0] && Object.prototype.hasOwnProperty.call(rows[0], paramKey)) {
+      const populated = rows.filter(
+        (row) => row[paramKey] != null && row[paramKey] !== "" && row[paramKey] !== "—",
+      ).length;
+      lines.push(`${requestedParam} shown for ${populated}/${rows.length} row(s).`);
+    }
+
+    const platforms = [...new Set(rows.map((row) => row.platform_number).filter(Boolean))];
+    if (platforms.length) {
+      const preview = platforms.slice(0, 5).join(", ");
+      lines.push(
+        `Platforms: ${preview}${platforms.length > 5 ? ` +${platforms.length - 5} more` : ""}`,
+      );
+    }
+
+    lines.push("The interactive table is displayed below.");
+    return lines.join("\n");
   }
 
   // ─── Build Data Context for LLM ────────────────────────────────────
@@ -755,7 +823,7 @@ RESPONSE GUIDELINES:
       const rows = toolResult.rows || [];
       if (rows.length === 0)
         return "No float data matched your query. Try widening your date range or geographic region.";
-      return `📋 **Data Table — ${rows.length} records**\n\nFound ${rows.length} ARGO float records matching your query. The interactive table is displayed above — you can scroll through all records and expand for more.`;
+      return `Data Table\n\n${rows.length} record(s) matched your query.\nThe interactive table is displayed below.`;
     }
 
     if (type === "text") {
@@ -785,12 +853,11 @@ RESPONSE GUIDELINES:
     ) {
       if (data.activeFloats != null) {
         return (
-          `📊 **ARGO Indian Ocean Dataset Summary**\n\n` +
-          `• **Active Floats:** ${data.activeFloats.toLocaleString()}\n` +
-          `• **Total Profiles:** ${data.total_profiles?.toLocaleString() || "—"}\n` +
-          `• **BGC Profiles:** ${data.total_bgc_profiles?.toLocaleString() || "—"}\n` +
-          `• **BGC Coverage:** ${data.bgcCoverage || "—"}\n\n` +
-          `This dataset covers floats deployed across the Indian Ocean basin, collecting temperature, salinity, and pressure data through autonomous profiling.`
+          `Dataset Summary\n\n` +
+          `Active floats: ${data.activeFloats.toLocaleString()}\n` +
+          `Profiles: ${data.total_profiles?.toLocaleString() || "—"}\n` +
+          `BGC profiles: ${data.total_bgc_profiles?.toLocaleString() || "—"}\n` +
+          `BGC coverage: ${data.bgcCoverage || "—"}`
         );
       }
       return `📊 Data retrieved:\n\n\`\`\`json\n${JSON.stringify(data, null, 2).substring(0, 600)}\n\`\`\``;
@@ -891,6 +958,61 @@ RESPONSE GUIDELINES:
     return { lat: 15, lon: 75 };
   }
 
+  _extractExplicitDateRange(q) {
+    const isoMatch = q.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+    if (isoMatch) {
+      return { date_start: isoMatch[1], date_end: isoMatch[1] };
+    }
+
+    const normalized = q.replace(
+      /\b(\d{1,2})(st|nd|rd|th)\b/gi,
+      (_, day) => day,
+    );
+    const namedDateMatch = normalized.match(
+      /\b(\d{1,2})\s+(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{4})\b/i,
+    );
+    if (!namedDateMatch) return null;
+
+    const [, day, monthName, year] = namedDateMatch;
+    const parsed = new Date(`${monthName} ${day}, ${year} UTC`);
+    if (Number.isNaN(parsed.getTime())) return null;
+
+    const yyyy = parsed.getUTCFullYear();
+    const mm = String(parsed.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(parsed.getUTCDate()).padStart(2, "0");
+    const isoDate = `${yyyy}-${mm}-${dd}`;
+    return { date_start: isoDate, date_end: isoDate };
+  }
+
+  _extractRelativeDateRange(q) {
+    const lowered = String(q || "").toLowerCase();
+    const match = lowered.match(/\b(last|past)\s+(\d+)\s+(day|days|month|months|year|years)\b/);
+    if (!match) return null;
+
+    const [, , amountText, unit] = match;
+    const amount = parseInt(amountText, 10);
+    if (!Number.isFinite(amount) || amount <= 0) return null;
+
+    const end = new Date();
+    const start = new Date(end);
+
+    if (unit.startsWith("day")) {
+      start.setUTCDate(start.getUTCDate() - amount);
+    } else if (unit.startsWith("month")) {
+      start.setUTCMonth(start.getUTCMonth() - amount);
+    } else if (unit.startsWith("year")) {
+      start.setUTCFullYear(start.getUTCFullYear() - amount);
+    }
+
+    const toIsoDate = (date) =>
+      `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
+
+    return {
+      date_start: toIsoDate(start),
+      date_end: toIsoDate(end),
+    };
+  }
+
   _cleanLLMResponse(text) {
     if (!text) return text;
     // Remove emojis (🌊, 📊, 🗺️, 📈, 🃏, 📋, 👋, ✓, etc.)
@@ -960,6 +1082,7 @@ RESPONSE GUIDELINES:
       "platform_number",
       "cycle_number",
       "timestamp",
+      "timestamp_location",
       "date",
       "latitude",
       "longitude",
@@ -1152,6 +1275,60 @@ RESPONSE GUIDELINES:
     }
 
     return String(data).substring(0, 500);
+  }
+
+  _shouldSkipVectorSearch(query) {
+    const q = String(query || "").trim().toLowerCase();
+    return /^(hi|hello|hey|good\s*(morning|afternoon|evening)|what'?s\s*up|howdy)\b/.test(
+      q,
+    );
+  }
+
+  _shouldUseVectorSearch(intent, query) {
+    if (!intent || intent.tool !== "generic_chat") {
+      return false;
+    }
+
+    return !this._shouldSkipVectorSearch(query);
+  }
+
+  _normalizeIntent(query, intent) {
+    const fallbackIntent = this._keywordFallbackIntent(query);
+    if (!intent) return fallbackIntent;
+
+    if (intent.tool === "generic_chat" && fallbackIntent.tool !== "generic_chat") {
+      return fallbackIntent;
+    }
+
+    const fallbackHasDateRange =
+      fallbackIntent?.params?.date_start && fallbackIntent?.params?.date_end;
+    const intentHasDateRange =
+      intent?.params?.date_start && intent?.params?.date_end;
+    const fallbackHasParam = !!fallbackIntent?.params?.param;
+    const intentHasParam = !!intent?.params?.param;
+
+    if (
+      fallbackHasDateRange &&
+      fallbackHasParam &&
+      !intentHasDateRange &&
+      ["generic_chat", "get_metadata_card", "get_data_table"].includes(
+        intent.tool,
+      )
+    ) {
+      return fallbackIntent;
+    }
+
+    if (
+      fallbackHasDateRange &&
+      fallbackHasParam &&
+      intentHasDateRange &&
+      !intentHasParam &&
+      ["search_profiles", "get_data_table"].includes(intent.tool)
+    ) {
+      return fallbackIntent;
+    }
+
+    return intent;
   }
 
   // ─── Pure semantic search (for /api/search endpoint) ────────────────

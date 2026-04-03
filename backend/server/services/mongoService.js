@@ -80,7 +80,7 @@ class MongoService {
     ]);
   }
 
-  async saveMessage(sessionId, type, content, code = null) {
+  async saveMessage(sessionId, type, content, code = null, metadata = null) {
     const oid = this._toObjectId(sessionId);
     if (!oid) return;
     const doc = {
@@ -91,6 +91,9 @@ class MongoService {
       code: code || null,
       timestamp: new Date(),
     };
+    if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) {
+      Object.assign(doc, metadata);
+    }
     await this.db.collection("chat_messages").insertOne(doc);
     await this.db
       .collection("chat_sessions")
@@ -158,14 +161,27 @@ class MongoService {
 
   // ─── Date / Profile Queries ─────────────────────────────────────────
 
-  async profilesByDate(dateStart, dateEnd, bbox = null) {
+  async profilesByDate(dateStart, dateEnd, bbox = null, options = {}) {
     let { start, end } = this._normalizeDateRange(dateStart, dateEnd);
+    const collectionName = options.collection || "profiles";
+    const includeMeasurements = !!options.includeMeasurements;
+    const limit = Math.min(options.limit || 500, 1000);
 
     const filter = {
-      timestamp: {
-        $gte: new Date(dateStart),
-        $lte: new Date(dateEnd),
-      },
+      $or: [
+        {
+          timestamp: {
+            $gte: start,
+            $lt: end,
+          },
+        },
+        {
+          timestamp_location: {
+            $gte: start,
+            $lt: end,
+          },
+        },
+      ],
     };
     if (bbox) {
       const latBounds = this._normalizeBounds(
@@ -191,11 +207,11 @@ class MongoService {
     }
 
     return this.db
-      .collection("profiles")
+      .collection(collectionName)
       .find(filter)
-      .project({ measurements: 0 })
-      .sort({ timestamp: -1 })
-      .limit(500)
+      .project(includeMeasurements ? {} : { measurements: 0 })
+      .sort({ timestamp: -1, timestamp_location: -1 })
+      .limit(limit)
       .toArray();
   }
 

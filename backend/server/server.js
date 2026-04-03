@@ -40,6 +40,7 @@ const LLM_BASE_URL = process.env.LLM_BASE_URL || "https://openrouter.ai/api/v1";
 const CHROMA_PERSIST_DIR = process.env.CHROMA_PERSIST_DIR
   ? path.resolve(__dirname, process.env.CHROMA_PERSIST_DIR)
   : path.resolve(__dirname, "../../chroma_data");
+const CHROMA_URL = process.env.CHROMA_URL || "http://localhost:8000";
 const PORT = parseInt(process.env.PORT || "3001", 10);
 
 logger.info("Starting FloatChat-AI Server", {
@@ -53,7 +54,7 @@ logger.info("Starting FloatChat-AI Server", {
 // ─── Service Instances ────────────────────────────────────────────────────────
 
 const mongoService = new MongoService(MONGO_URI, DB_NAME);
-const vectorService = new VectorService(CHROMA_PERSIST_DIR);
+const vectorService = new VectorService(CHROMA_PERSIST_DIR, CHROMA_URL);
 const mcpService = new McpService(mongoService);
 const ragService = new RagService(vectorService, mongoService, mcpService, {
   llmApiKey: LLM_API_KEY,
@@ -308,7 +309,11 @@ app.use("/api", createRoutes(ragService, mongoService, vectorService));
 
 // ─── Health Check ────────────────────────────────────────────────────────────
 
-app.get("/health", (req, res) => {
+app.get("/health", async (req, res) => {
+  const vector = await vectorService
+    .getStats()
+    .catch(() => ({ status: "unavailable", url: CHROMA_URL }));
+
   res.json({
     status: "ok",
     timestamp: new Date(),
@@ -317,6 +322,7 @@ app.get("/health", (req, res) => {
     database: DB_NAME,
     mongodb: "connected",
     llm: "configured",
+    vector,
   });
 });
 

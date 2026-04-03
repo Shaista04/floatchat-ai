@@ -315,13 +315,14 @@ const endIcon = L.divIcon({
 const LeafletRenderer = ({ center, zoom, markers = [], polyline = null }) => {
   const safeCenter = center || [10, 75];
   const safeZoom   = zoom   || 4;
+  const mapHeight = polyline ? "380px" : "320px";
 
   return (
     <div className="mt-4 rounded-xl overflow-hidden border border-slate-200 shadow-sm">
       <MapContainer
         center={safeCenter}
         zoom={safeZoom}
-        style={{ height: "300px", width: "100%" }}
+        style={{ height: mapHeight, width: "100%" }}
         className="z-0"
         scrollWheelZoom={false}
       >

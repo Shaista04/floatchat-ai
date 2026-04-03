@@ -1,6 +1,6 @@
 'use strict';
 
-const { ChromaClient } = require('chromadb');
+const { ChromaClient, DefaultEmbeddingFunction } = require('chromadb');
 const path = require('path');
 
 /**
@@ -12,28 +12,35 @@ const path = require('path');
  * Uses the chromadb npm package directly — no Python subprocess needed.
  */
 class VectorService {
-  constructor(chromaPersistDir = null) {
+  constructor(chromaPersistDir = null, chromaUrl = null) {
     this.persistDir = chromaPersistDir || path.resolve(__dirname, '../../..', 'chroma_data');
+    this.url = chromaUrl || process.env.CHROMA_URL || 'http://localhost:8000';
     this.client = null;
     this.collections = {};
+    this.embeddingFunction = new DefaultEmbeddingFunction();
     this.status = 'disconnected'; // 'connected', 'disconnected', 'unavailable'
+    this.lastError = null;
   }
 
   async connect() {
     try {
-      // Connect to ChromaDB — use HTTP client if a server is running
-      this.client = new ChromaClient({ path: 'http://localhost:8000' });
+      this.lastError = null;
+
+      // Connect to ChromaDB — this JS client talks to a running Chroma server over HTTP.
+      this.client = new ChromaClient({ path: this.url });
 
       // Try to heartbeat — if it fails, ChromaDB server isn't running
       try {
         await this.client.heartbeat();
-        console.log('✅ VectorService connected to ChromaDB server at http://localhost:8000');
+        console.log(`✅ VectorService connected to ChromaDB server at ${this.url}`);
         this.status = 'connected';
       } catch {
         // ChromaDB server not running
-        console.log('⚠️  ChromaDB server not available at http://localhost:8000');
+        this.lastError = `ChromaDB server not available at ${this.url}`;
+        console.log(`⚠️  ${this.lastError}`);
+        console.log(`   → Local Chroma data directory detected at: ${this.persistDir}`);
         console.log('   → Vector/semantic search will be unavailable. MongoDB-only mode active.');
-        console.log('   → To enable: pip install chromadb && chroma run --path ./chroma_data');
+        console.log(`   → To enable: pip install chromadb && chroma run --path ${this.persistDir}`);
         this.client = null;
         this.status = 'unavailable';
         return;
@@ -43,7 +50,10 @@ class VectorService {
       const collectionNames = ['argo_profiles', 'argo_bgc_profiles', 'argo_floats'];
       for (const name of collectionNames) {
         try {
-          this.collections[name] = await this.client.getCollection({ name });
+          this.collections[name] = await this.client.getCollection({
+            name,
+            embeddingFunction: this.embeddingFunction,
+          });
           const count = await this.collections[name].count();
           console.log(`   📊 Collection "${name}": ${count} documents`);
         } catch (e) {
@@ -55,6 +65,7 @@ class VectorService {
       console.log('   Vector search will be unavailable. System will use MongoDB only.');
       this.client = null;
       this.status = 'unavailable';
+      this.lastError = e.message;
     }
   }
 
@@ -101,6 +112,7 @@ class VectorService {
           }
         }
       } catch (e) {
+        this.lastError = e.message;
         console.warn(`[VectorService] Error querying ${name}:`, e.message);
       }
     }
@@ -112,7 +124,9 @@ class VectorService {
     const RERANK_THRESHOLD = 1.3; // cosine distance, lower is better (0 = identical)
     const reranked = results.filter((r) => r.distance != null && r.distance < RERANK_THRESHOLD);
 
-    return reranked.length > 0 ? reranked.slice(0, nResults * 3) : results.slice(0, nResults);
+    return reranked.length > 0
+      ? reranked.slice(0, nResults)
+      : results.slice(0, nResults);
   }
 
   /**
@@ -136,12 +150,27 @@ class VectorService {
    * Get stats for all collections.
    */
   async getStats() {
-    if (!this.client) return { status: this.status };
+    if (!this.client) {
+      return {
+        status: this.status,
+        url: this.url,
+        persist_dir: this.persistDir,
+        last_error: this.lastError,
+        loaded_collections: [],
+      };
+    }
 
-    const stats = { status: this.status };
+    const stats = {
+      status: this.status,
+      url: this.url,
+      persist_dir: this.persistDir,
+      last_error: this.lastError,
+      loaded_collections: [],
+    };
     for (const [name, col] of Object.entries(this.collections)) {
       try {
         stats[name] = await col.count();
+        stats.loaded_collections.push(name);
       } catch {
         stats[name] = 0;
       }

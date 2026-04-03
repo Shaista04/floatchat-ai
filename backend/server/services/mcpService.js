@@ -66,9 +66,9 @@ class McpService {
         case 'profiles_by_date':
         case 'search_profiles':
           return {
-            tool: toolName, type: 'data',
-            data: await this.mongo.profilesByDate(
-              params.date_start, params.date_end, params.bbox || null),
+            tool: toolName,
+            type: 'data_table',
+            ...await this._buildDateProfileTable(params),
           };
 
         case 'profiles_by_region':
@@ -369,6 +369,76 @@ class McpService {
           };
         }
 
+        case 'visualize_profiles_by_date':
+        case 'plot_profiles_by_date': {
+          const param = (params.param || 'TEMP').toUpperCase();
+          const collectionName = this.mongo._getCollection(param);
+          const profiles = await this.mongo.profilesByDate(
+            params.date_start,
+            params.date_end,
+            params.bbox || params,
+            {
+              includeMeasurements: true,
+              collection: collectionName,
+              limit: Math.min(+(params.limit || 12), 24),
+            },
+          );
+
+          const paramKey = param.toLowerCase();
+          const traces = profiles
+            .map((profile) => {
+              const points = (profile.measurements || [])
+                .filter((m) => m.pres != null && m[paramKey] != null)
+                .map((m) => ({ pres: m.pres, value: m[paramKey] }));
+
+              if (!points.length) return null;
+
+              const profileDate = profile.timestamp_location || profile.timestamp;
+              return {
+                x: points.map((point) => point.value),
+                y: points.map((point) => -(point.pres || 0)),
+                mode: 'lines+markers',
+                type: 'scatter',
+                name: `${profile.platform_number} C${profile.cycle_number}`,
+                marker: { size: 4 },
+                line: { width: 2 },
+                hovertemplate:
+                  `${profile.platform_number} C${profile.cycle_number}<br>` +
+                  `${profileDate ? new Date(profileDate).toLocaleString() : ''}<br>` +
+                  `Value: %{x:.3f}<br>Depth: %{y:.0f} m<extra></extra>`,
+              };
+            })
+            .filter(Boolean);
+
+          if (!traces.length) {
+            return { tool: toolName, type: 'data', data: [] };
+          }
+
+          const axisLabel = {
+            TEMP: 'Temperature (°C)', PSAL: 'Salinity (PSU)',
+            PRES: 'Pressure (dbar)', DOXY: 'Dissolved Oxygen (µmol/kg)',
+            CHLA: 'Chlorophyll-a (mg/m³)', NITRATE: 'Nitrate (µmol/kg)',
+          };
+
+          return {
+            tool: toolName,
+            type: 'plotly',
+            plotly: {
+              data: traces,
+              layout: {
+                title: {
+                  text: `${param} Profiles — ${params.date_start} to ${params.date_end}`,
+                  font: { size: 14 },
+                },
+                xaxis: { title: axisLabel[param] || param },
+                yaxis: { title: 'Depth (m)', autorange: true },
+                legend: { orientation: 'h', y: -0.25 },
+                hovermode: 'closest',
+              },
+            },
+          };
+        }
+
         case 'visualize_time_series':
         case 'depth_time_plot': {
           const param = (params.param || 'TEMP').toUpperCase();
@@ -601,21 +671,11 @@ class McpService {
         case 'get_data_table': {
           let rows;
           if (params.date_start || params.date_end) {
-            const tableProfiles = await this.mongo.profilesByDate(
-              params.date_start || '2000-01-01',
-              params.date_end || '2030-01-01',
-              params
-            );
-            rows = tableProfiles.map(p => {
-              const row = {
-                platform_number: p.platform_number,
-                cycle_number: p.cycle_number,
-                date: p.timestamp || null,
-                latitude: p.latitude ?? null,
-                longitude: p.longitude ?? null,
-              };
-              return row;
-            });
+            rows = (await this._buildDateProfileTable({
+              ...params,
+              date_start: params.date_start || '2000-01-01',
+              date_end: params.date_end || '2030-01-01',
+            })).rows;
           } else if (params.platform && params.platform !== '00000' && params.platform !== 'null') {
             const tableProfiles = await this.mongo.queryFloat(params.platform, null);
             rows = tableProfiles.map(p => ({
@@ -737,12 +797,13 @@ class McpService {
         type: 'function',
         function: {
           name: 'search_profiles',
-          description: 'Search for ARGO profiles by date range and optionally by bounding box. Also used for semantic/natural language profile search like "find profiles in the Arabian Sea". Use for queries like "profiles in January 2024" or "measurements between March and June 2023".',
+          description: 'Search for ARGO profiles by date range and optionally by bounding box. Returns tabular profile rows with recorded parameter summaries. Also used for semantic/natural language profile search like "find profiles in the Arabian Sea". Use for queries like "profiles in January 2024", "measurements between March and June 2023", or "temperature recorded on 1 January 2026".',
           parameters: {
             type: 'object',
             properties: {
               date_start: { type: 'string', description: 'Start date YYYY-MM-DD. For a single day, set both date_start and date_end to the same value.' },
               date_end: { type: 'string', description: 'End date YYYY-MM-DD' },
+              param: { type: 'string', enum: ['TEMP', 'PSAL', 'DOXY', 'CHLA', 'NITRATE', 'PRES'], description: 'Optional parameter to highlight in the returned table' },
               lat_min: { type: 'number', description: 'Optional bounding box south latitude' },
               lat_max: { type: 'number', description: 'Optional bounding box north latitude' },
               lon_min: { type: 'number', description: 'Optional bounding box west longitude' },
@@ -952,6 +1013,31 @@ class McpService {
       {
         type: 'function',
         function: {
+          name: 'visualize_profiles_by_date',
+          description: 'Generate a depth-profile plot for all matching profiles within a date range. Use for queries like "plot the temperature recorded on 1 January 2026", "graph salinity profiles in March 2024", or "visualize DOXY profiles on a specific day".',
+          parameters: {
+            type: 'object',
+            properties: {
+              date_start: { type: 'string', description: 'Start date YYYY-MM-DD. For a single day, set both date_start and date_end to the same value.' },
+              date_end: { type: 'string', description: 'End date YYYY-MM-DD' },
+              param: {
+                type: 'string',
+                enum: ['TEMP', 'PSAL', 'DOXY', 'CHLA', 'NITRATE', 'PRES'],
+                description: 'Parameter to plot (default: TEMP)',
+              },
+              lat_min: { type: 'number', description: 'Optional bounding box south latitude' },
+              lat_max: { type: 'number', description: 'Optional bounding box north latitude' },
+              lon_min: { type: 'number', description: 'Optional bounding box west longitude' },
+              lon_max: { type: 'number', description: 'Optional bounding box east longitude' },
+              limit: { type: 'number', description: 'Maximum number of profiles to plot (default 12)' },
+            },
+            required: ['date_start', 'date_end'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
           name: 'visualize_time_series',
           description: 'Generate a time series chart of a parameter across cycles for a specific float. Use for "temperature over time for float X", "salinity trends", "plot temperature changes over time at 10 meters depth".',
           parameters: {
@@ -1074,6 +1160,68 @@ class McpService {
 
   _indianOceanBbox() {
     return { lat_min: -60, lat_max: 30, lon_min: 20, lon_max: 120 };
+  }
+
+  async _buildDateProfileTable(params = {}) {
+    const requestedParam = (params.param || "").toUpperCase();
+    const collectionName =
+      requestedParam && this.mongo._isBgcParam(requestedParam)
+        ? 'bgc_profiles'
+        : 'profiles';
+
+    const profiles = await this.mongo.profilesByDate(
+      params.date_start,
+      params.date_end,
+      params.bbox || params,
+      {
+        includeMeasurements: true,
+        collection: collectionName,
+        limit: Math.min(+(params.limit || 100), 200),
+      },
+    );
+
+    const rows = profiles.map((profile) =>
+      this._buildProfileMeasurementRow(profile, requestedParam),
+    );
+
+    return {
+      columns: rows.length ? Object.keys(rows[0]) : [],
+      rows,
+    };
+  }
+
+  _buildProfileMeasurementRow(profile, requestedParam = "") {
+    const timestamp = profile.timestamp_location || profile.timestamp || null;
+    const row = {
+      platform_number: profile.platform_number,
+      cycle_number: profile.cycle_number,
+      timestamp: timestamp,
+      latitude: profile.latitude ?? null,
+      longitude: profile.longitude ?? null,
+    };
+
+    if (requestedParam) {
+      row[requestedParam.toLowerCase()] = this._formatMeasurementSummary(
+        profile.measurements,
+        requestedParam.toLowerCase(),
+      );
+      return row;
+    }
+
+    row.temp = this._formatMeasurementSummary(profile.measurements, 'temp');
+    row.psal = this._formatMeasurementSummary(profile.measurements, 'psal');
+    return row;
+  }
+
+  _formatMeasurementSummary(measurements, key) {
+    const values = this.mongo._extractValidNumbers(measurements, key);
+    if (!values.length) return '—';
+
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+
+    return `${mean.toFixed(2)} avg (${min.toFixed(2)}-${max.toFixed(2)})`;
   }
 }
 
