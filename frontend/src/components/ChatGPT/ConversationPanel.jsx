@@ -1,4 +1,6 @@
 import React, { useEffect, useRef } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { User, Bot, Copy, ThumbsUp, ThumbsDown } from "lucide-react";
 import MessageDisplay from "./MessageDisplay";
 import { COLORS } from "../../constants/theme";
@@ -7,6 +9,85 @@ import { COLORS } from "../../constants/theme";
  * ConversationPanel Component
  * Main chat conversation display area with messages and auto-scroll
  */
+const markdownComponents = {
+  p: ({ children }) => (
+    <p style={{ margin: "0 0 10px", lineHeight: 1.7 }}>{children}</p>
+  ),
+  ul: ({ children }) => (
+    <ul style={{ margin: "8px 0", paddingLeft: "20px" }}>{children}</ul>
+  ),
+  ol: ({ children }) => (
+    <ol style={{ margin: "8px 0", paddingLeft: "20px" }}>{children}</ol>
+  ),
+  li: ({ children }) => <li style={{ marginBottom: "4px" }}>{children}</li>,
+  code: ({ inline, children }) =>
+    inline ? (
+      <code
+        style={{
+          background: "#e2e8f0",
+          borderRadius: "6px",
+          padding: "2px 6px",
+          fontSize: "0.85em",
+        }}
+      >
+        {children}
+      </code>
+    ) : (
+      <code>{children}</code>
+    ),
+  pre: ({ children }) => (
+    <pre
+      style={{
+        background: "#0f172a",
+        color: "#cbd5e1",
+        borderRadius: "12px",
+        padding: "14px",
+        overflowX: "auto",
+        margin: "12px 0",
+      }}
+    >
+      {children}
+    </pre>
+  ),
+  table: ({ children }) => (
+    <div style={{ overflowX: "auto", margin: "12px 0" }}>
+      <table
+        style={{
+          width: "100%",
+          borderCollapse: "collapse",
+          fontSize: "0.82rem",
+        }}
+      >
+        {children}
+      </table>
+    </div>
+  ),
+  th: ({ children }) => (
+    <th
+      style={{
+        textAlign: "left",
+        padding: "8px 10px",
+        borderBottom: `1px solid ${COLORS.border}`,
+        background: "#f8fafc",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {children}
+    </th>
+  ),
+  td: ({ children }) => (
+    <td
+      style={{
+        padding: "8px 10px",
+        borderBottom: `1px solid ${COLORS.border}`,
+        verticalAlign: "top",
+      }}
+    >
+      {children}
+    </td>
+  ),
+};
+
 const ConversationPanel = ({ chatId, messages, isTyping }) => {
   const scrollRef = useRef(null);
 
@@ -24,7 +105,7 @@ const ConversationPanel = ({ chatId, messages, isTyping }) => {
         hour: "2-digit",
         minute: "2-digit",
       });
-    } catch (e) {
+    } catch {
       return "--:--";
     }
   };
@@ -265,12 +346,22 @@ const ConversationPanel = ({ chatId, messages, isTyping }) => {
                 >
                   <div
                     style={{
-                      whiteSpace: "pre-wrap",
                       lineHeight: 1.6,
                       fontSize: "0.95rem",
                     }}
                   >
-                    {message.content}
+                    {message.type === "ai" ? (
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={markdownComponents}
+                      >
+                        {message.content || ""}
+                      </ReactMarkdown>
+                    ) : (
+                      <div style={{ whiteSpace: "pre-wrap" }}>
+                        {message.content}
+                      </div>
+                    )}
                   </div>
 
                   {/* Code Block */}

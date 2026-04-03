@@ -139,6 +139,7 @@ class RagService {
         }
 
         toolResult = await this.mcpService.runTool(intent.tool, intent.params);
+        toolResult = this._prepareToolResultForDisplay(toolResult);
         console.log(`[RAG] MCP Tool Executed | Type: ${toolResult?.type}`);
 
         if (toolResult && !toolResult.error) {
@@ -190,7 +191,11 @@ class RagService {
 
     if (sessionId) {
       await this.mongoService
-        .saveMessage(sessionId, "ai", answer, toolCode)
+        .saveMessage(sessionId, "ai", answer, toolCode, {
+          toolResult,
+          toolUsed: intent.tool,
+          intentInfo: intentMessage,
+        })
         .catch(() => {});
     }
 
@@ -586,6 +591,12 @@ RESPONSE GUIDELINES:
 
         const summary = response.choices[0]?.message?.content;
         if (summary && summary.trim().length > 10) {
+          if (toolResult?.type === "data_table") {
+            return (
+              `${this._cleanLLMResponse(summary)}\n\n` +
+              "The interactive table is displayed below."
+            );
+          }
           return `${this._cleanLLMResponse(summary)}\n\nData:\n${structuredData}`;
         }
       } catch (e) {
@@ -900,11 +911,136 @@ RESPONSE GUIDELINES:
     return text.trim();
   }
 
+  _prepareToolResultForDisplay(toolResult) {
+    if (
+      !toolResult ||
+      toolResult.error ||
+      toolResult.type !== "data" ||
+      !Array.isArray(toolResult.data) ||
+      toolResult.data.length === 0
+    ) {
+      return toolResult;
+    }
+
+    const columns = this._selectTabularColumns(toolResult.data);
+    if (!columns.length) {
+      return toolResult;
+    }
+
+    return {
+      tool: toolResult.tool,
+      type: "data_table",
+      columns,
+      rows: toolResult.data.map((row) => {
+        const shapedRow = {};
+        for (const col of columns) {
+          shapedRow[col] = row?.[col];
+        }
+        return shapedRow;
+      }),
+      raw_type: toolResult.type,
+    };
+  }
+
+  _selectTabularColumns(rows, maxColumns = 8) {
+    if (!Array.isArray(rows) || rows.length === 0) return [];
+
+    const sample = rows.slice(0, 20).filter(
+      (row) => row && typeof row === "object" && !Array.isArray(row),
+    );
+    if (!sample.length) return [];
+
+    const allKeys = [...new Set(sample.flatMap((row) => Object.keys(row)))];
+    const preferredOrder = [
+      "_id",
+      "platform_number",
+      "cycle_number",
+      "timestamp",
+      "date",
+      "latitude",
+      "longitude",
+      "mission_number",
+      "config_mission_number",
+      "contains_bgc",
+      "data_centre",
+      "data_mode",
+      "data_state_indicator",
+      "max_pres",
+      "project_name",
+      "pi_name",
+      "platform_type",
+    ];
+
+    const scalarKeys = allKeys.filter((key) =>
+      sample.every((row) => this._isScalarLikeValue(row[key])),
+    );
+
+    const orderedScalarKeys = [
+      ...preferredOrder.filter((key) => scalarKeys.includes(key)),
+      ...scalarKeys.filter((key) => !preferredOrder.includes(key)),
+    ];
+
+    const orderedKeys = orderedScalarKeys.length
+      ? orderedScalarKeys
+      : [
+          ...preferredOrder.filter((key) => allKeys.includes(key)),
+          ...allKeys.filter((key) => !preferredOrder.includes(key)),
+        ];
+
+    return orderedKeys.slice(0, maxColumns);
+  }
+
+  _isScalarLikeValue(value) {
+    if (value == null) return true;
+    if (value instanceof Date) return true;
+    const type = typeof value;
+    return type === "string" || type === "number" || type === "boolean";
+  }
+
+  _formatCellValue(value, maxLength = 32) {
+    if (value == null || value === "") return "—";
+    if (value instanceof Date) {
+      return value.toLocaleDateString();
+    }
+    if (Array.isArray(value)) {
+      if (value.length === 0) return "[]";
+      if (value.every((item) => this._isScalarLikeValue(item))) {
+        const joined = value.join(", ");
+        return joined.length > maxLength
+          ? `${joined.substring(0, maxLength - 1)}…`
+          : joined;
+      }
+      return `${value.length} item${value.length === 1 ? "" : "s"}`;
+    }
+    if (typeof value === "object") {
+      const keys = Object.keys(value);
+      if (!keys.length) return "{}";
+      const preview = keys
+        .slice(0, 2)
+        .map((key) => `${key}: ${this._formatCellValue(value[key], 16)}`);
+      const text = preview.join(", ");
+      return keys.length > 2 ? `${text}, …` : text;
+    }
+    if (typeof value === "boolean") {
+      return value ? "true" : "false";
+    }
+    const text = String(value);
+    return text.length > maxLength
+      ? `${text.substring(0, maxLength - 1)}…`
+      : text;
+  }
+
   _formatStructuredData(toolResult) {
     const type = toolResult?.type;
     const data = toolResult?.data;
 
-    if (!data && type !== "plotly" && type !== "leaflet") {
+    const hasRenderableContent =
+      data != null ||
+      type === "plotly" ||
+      type === "leaflet" ||
+      type === "data_table";
+
+    if (!hasRenderableContent) {
       return "No data available";
     }
 
@@ -961,43 +1097,52 @@ RESPONSE GUIDELINES:
       if (rows.length === 0) {
         return "No records found";
       }
-      // Format as simple table
       const cols = toolResult.columns || Object.keys(rows[0] || {});
-      const header = cols.join(" | ");
-      const separator = cols.map((c) => "---").join("|");
-      const rowTexts = rows
-        .slice(0, 20)
+      const preview = rows
+        .slice(0, 3)
         .map((row) =>
           cols
-            .map((c) =>
-              row[c] != null ? String(row[c]).substring(0, 20) : "—",
-            )
-            .join(" | "),
+            .slice(0, 4)
+            .map((c) => `${c}=${this._formatCellValue(row[c], 24)}`)
+            .join(", "),
         );
-      return [header, separator, ...rowTexts].join("\n");
+      return [
+        `Found ${rows.length} records.`,
+        `Columns: ${cols.join(", ")}`,
+        preview.length ? `Preview: ${preview.join(" | ")}` : null,
+      ]
+        .filter(Boolean)
+        .join("\n");
     }
 
     if (Array.isArray(data)) {
       if (data.length === 0) {
         return "No records found";
       }
-      // Format array of objects as a simple table
       const sample = data[0];
-      const cols = Object.keys(sample).slice(0, 8);
-      const header = cols.join(" | ");
-      const separator = cols.map((c) => "---").join("|");
-      const rowTexts = data
-        .slice(0, 25)
+      if (!sample || typeof sample !== "object" || Array.isArray(sample)) {
+        return `Found ${data.length} records: ${data
+          .slice(0, 8)
+          .map((item) => this._formatCellValue(item, 24))
+          .join(", ")}`;
+      }
+
+      const cols = this._selectTabularColumns(data, 6);
+      const preview = data
+        .slice(0, 5)
         .map((row) =>
           cols
-            .map((c) =>
-              row[c] != null ? String(row[c]).substring(0, 20) : "—",
-            )
-            .join(" | "),
+            .map((c) => `${c}=${this._formatCellValue(row[c], 20)}`)
+            .join(", "),
         );
-      const moreText =
-        data.length > 25 ? `\n... and ${data.length - 25} more records` : "";
-      return [header, separator, ...rowTexts, moreText].join("\n");
+
+      return [
+        `Found ${data.length} records.`,
+        cols.length ? `Fields: ${cols.join(", ")}` : null,
+        preview.length ? `Preview: ${preview.join(" | ")}` : null,
+      ]
+        .filter(Boolean)
+        .join("\n");
     }
 
     if (typeof data === "object") {

@@ -32,7 +32,9 @@ async function fetchRawData() {
                     const tempStr = (typeof temp === 'number' ? temp.toFixed(3) : 'N/A').padStart(9);
                     const psal = (m.psal_adjusted !== undefined ? m.psal_adjusted : m.psal !== undefined ? m.psal : 'N/A');
                     const psalStr = (typeof psal === 'number' ? psal.toFixed(3) : 'N/A').padStart(14);
-                    const date = profile.timestamp ? profile.timestamp.split('T')[0] : 'N/A';
+                    const date = profile.timestamp
+                        ? new Date(profile.timestamp).toISOString().split('T')[0]
+                        : 'N/A';
                     
                     console.log(`${pres} | ${tempStr} | ${psalStr} | ${date}`);
                 });

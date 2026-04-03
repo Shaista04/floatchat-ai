@@ -171,26 +171,7 @@ class MongoService {
   // ─── Date / Profile Queries ─────────────────────────────────────────
 
   async profilesByDate(dateStart, dateEnd, bbox = null) {
-    // Parse dates and handle timezone/boundary issues
-    let start = new Date(dateStart);
-    let end = new Date(dateEnd);
-
-    // Validate dates
-    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
-      throw new Error(
-        "Invalid date format. Use YYYY-MM-DD or ISO 8601 format.",
-      );
-    }
-
-    // If end date is just a date (no time), extend to end of day
-    if (!/T/.test(dateEnd)) {
-      end = new Date(end.getTime() + 86400000); // Add 24 hours
-    }
-
-    // Ensure start <= end
-    if (start > end) {
-      [start, end] = [end, start];
-    }
+    let { start, end } = this._normalizeDateRange(dateStart, dateEnd);
 
     const filter = {
       timestamp: {
@@ -200,17 +181,25 @@ class MongoService {
     };
 
     if (bbox) {
-      if (bbox.lat_min != null) {
-        filter.latitude = {
-          $gte: Math.max(-90, +bbox.lat_min),
-          $lte: Math.min(90, +bbox.lat_max),
-        };
+      const latBounds = this._normalizeBounds(
+        bbox.lat_min,
+        bbox.lat_max,
+        -90,
+        90,
+      );
+      const lonBounds = this._normalizeBounds(
+        bbox.lon_min,
+        bbox.lon_max,
+        -180,
+        180,
+      );
+
+      if (latBounds) {
+        filter.latitude = { $gte: latBounds[0], $lte: latBounds[1] };
       }
-      if (bbox.lon_min != null) {
-        filter.longitude = {
-          $gte: Math.max(-180, +bbox.lon_min),
-          $lte: Math.min(180, +bbox.lon_max),
-        };
+
+      if (lonBounds) {
+        filter.longitude = { $gte: lonBounds[0], $lte: lonBounds[1] };
       }
     }
 
@@ -612,6 +601,65 @@ class MongoService {
         );
       });
   }
+
+  _normalizeDateRange(dateStart, dateEnd) {
+    const parsedStart = new Date(dateStart);
+    const parsedEnd = new Date(dateEnd);
+
+    if (
+      Number.isNaN(parsedStart.getTime()) ||
+      Number.isNaN(parsedEnd.getTime())
+    ) {
+      throw new Error(
+        "Invalid date format. Use YYYY-MM-DD or ISO 8601 format.",
+      );
+    }
+
+    const startComesFirst = parsedStart <= parsedEnd;
+    let start = startComesFirst ? parsedStart : parsedEnd;
+    let end = startComesFirst ? parsedEnd : parsedStart;
+    const upperBoundInput = startComesFirst ? dateEnd : dateStart;
+
+    if (typeof upperBoundInput === "string" && !upperBoundInput.includes("T")) {
+      end = new Date(end.getTime() + 86400000);
+    }
+
+    return { start, end };
+  }
+
+  _normalizeBounds(min, max, floor, ceiling) {
+    if (min == null || max == null) return null;
+
+    const parsedMin = Number(min);
+    const parsedMax = Number(max);
+    if (!Number.isFinite(parsedMin) || !Number.isFinite(parsedMax)) return null;
+
+    const clampedMin = Math.max(floor, Math.min(ceiling, parsedMin));
+    const clampedMax = Math.max(floor, Math.min(ceiling, parsedMax));
+
+    return clampedMin <= clampedMax
+      ? [clampedMin, clampedMax]
+      : [clampedMax, clampedMin];
+  }
+}
+
+if (require.main === module) {
+  (async () => {
+    const mongoService = new MongoService(
+      "mongodb://localhost:27017",
+      process.env.DATABASE_NAME || "floatchat_ai",
+    );
+    await mongoService.connect();
+    const result = await mongoService.profilesByDate(
+      "2023-01-01",
+      "2023-01-31",
+    );
+    console.log("Profiles in January 2023:", result.length);
+    await mongoService.close();
+  })().catch((error) => {
+    console.error("MongoService debug query failed:", error);
+    process.exit(1);
+  });
 }
 
 module.exports = MongoService;

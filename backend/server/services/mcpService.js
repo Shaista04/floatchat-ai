@@ -610,9 +610,9 @@ class McpService {
               const row = {
                 platform_number: p.platform_number,
                 cycle_number: p.cycle_number,
-                date: p.timestamp ? new Date(p.timestamp).toLocaleDateString() : '—',
-                latitude: p.latitude?.toFixed(4),
-                longitude: p.longitude?.toFixed(4),
+                date: p.timestamp || null,
+                latitude: p.latitude ?? null,
+                longitude: p.longitude ?? null,
               };
               return row;
             });
@@ -621,9 +621,9 @@ class McpService {
             rows = tableProfiles.map(p => ({
               platform_number: p.platform_number,
               cycle_number: p.cycle_number,
-              latitude: p.latitude?.toFixed(4),
-              longitude: p.longitude?.toFixed(4),
-              timestamp: p.timestamp ? new Date(p.timestamp).toLocaleDateString() : '—',
+              latitude: p.latitude ?? null,
+              longitude: p.longitude ?? null,
+              timestamp: p.timestamp || null,
               max_pres: p.max_pres,
             }));
           } else {
@@ -633,8 +633,8 @@ class McpService {
               total_cycles: f.total_cycles,
               has_bgc: f.has_bgc ? 'Yes' : 'No',
               data_centre: f.data_centre,
-              first_date: f.first_date ? new Date(f.first_date).toLocaleDateString() : '—',
-              last_date: f.last_date ? new Date(f.last_date).toLocaleDateString() : '—',
+              first_date: f.first_date || null,
+              last_date: f.last_date || null,
             }));
           }
           return {

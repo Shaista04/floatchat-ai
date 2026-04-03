@@ -60,6 +60,206 @@ const ChatMessageRenderer = ({ toolResult }) => {
   }
 };
 
+const TABLE_DATE_FORMATTER = new Intl.DateTimeFormat("en-GB", {
+  day: "2-digit",
+  month: "short",
+  year: "numeric",
+  timeZone: "UTC",
+});
+
+const TABLE_TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("en-GB", {
+  day: "2-digit",
+  month: "short",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+  timeZone: "UTC",
+});
+
+const isDateLikeValue = (value) =>
+  value instanceof Date ||
+  (typeof value === "string" &&
+    /^\d{4}-\d{2}-\d{2}(?:T|\b)/.test(value) &&
+    !Number.isNaN(new Date(value).getTime()));
+
+const isTimestampColumn = (column) => /timestamp|date/i.test(column);
+const isLatitudeColumn = (column) => /^(lat|latitude)$/i.test(column);
+const isLongitudeColumn = (column) => /^(lon|lng|longitude)$/i.test(column);
+
+const formatColumnLabel = (column) => {
+  const specialLabels = {
+    _id: "Profile ID",
+    platform_number: "Platform Number",
+    cycle_number: "Cycle",
+    max_pres: "Max Pressure",
+  };
+
+  if (specialLabels[column]) return specialLabels[column];
+  return column
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+};
+
+const formatCoordinate = (value, axis) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return null;
+
+  const direction =
+    axis === "lat"
+      ? numeric >= 0
+        ? "N"
+        : "S"
+      : numeric >= 0
+        ? "E"
+        : "W";
+
+  return {
+    compact: `${Math.abs(numeric).toFixed(4)}° ${direction}`,
+    raw: numeric.toFixed(4),
+  };
+};
+
+const formatTemporalValue = (value, column) => {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+
+  const showTime =
+    /timestamp/i.test(column) ||
+    (typeof value === "string" && value.includes("T"));
+
+  return showTime
+    ? {
+        primary: TABLE_TIMESTAMP_FORMATTER.format(date),
+        secondary: "UTC",
+      }
+    : {
+        primary: TABLE_DATE_FORMATTER.format(date),
+        secondary: null,
+      };
+};
+
+const formatTableCellValue = (value, maxLength = 48) => {
+  if (value == null || value === "") return "—";
+  if (value instanceof Date) return value.toLocaleDateString();
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "[]";
+    if (
+      value.every(
+        (item) =>
+          item == null ||
+          ["string", "number", "boolean"].includes(typeof item),
+      )
+    ) {
+      const joined = value.join(", ");
+      return joined.length > maxLength
+        ? `${joined.slice(0, maxLength - 1)}…`
+        : joined;
+    }
+    return `${value.length} item${value.length === 1 ? "" : "s"}`;
+  }
+
+  if (typeof value === "object") {
+    const keys = Object.keys(value);
+    if (!keys.length) return "{}";
+    const preview = keys
+      .slice(0, 2)
+      .map((key) => `${key}: ${formatTableCellValue(value[key], 16)}`)
+      .join(", ");
+    return keys.length > 2 ? `${preview}, …` : preview;
+  }
+
+  const text = String(value);
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+};
+
+const renderTableCell = (column, value) => {
+  if (value == null || value === "") {
+    return <span className="text-slate-300">—</span>;
+  }
+
+  if (isLatitudeColumn(column) || isLongitudeColumn(column)) {
+    const coordinate = formatCoordinate(
+      value,
+      isLatitudeColumn(column) ? "lat" : "lon",
+    );
+    if (coordinate) {
+      return (
+        <div className="min-w-[8rem] leading-tight">
+          <div className="font-semibold text-slate-800">{coordinate.compact}</div>
+          <div className="mt-1 text-[11px] text-slate-400">{coordinate.raw}</div>
+        </div>
+      );
+    }
+  }
+
+  if (isTimestampColumn(column) && isDateLikeValue(value)) {
+    const temporal = formatTemporalValue(value, column);
+    if (temporal) {
+      return (
+        <div className="min-w-[10.5rem] leading-tight">
+          <div className="font-semibold text-slate-800">{temporal.primary}</div>
+          {temporal.secondary && (
+            <div className="mt-1 text-[11px] uppercase tracking-[0.18em] text-slate-400">
+              {temporal.secondary}
+            </div>
+          )}
+        </div>
+      );
+    }
+  }
+
+  if (column === "platform_number") {
+    return (
+      <span className="inline-flex min-w-[7.5rem] items-center justify-center rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-[11px] font-semibold tracking-[0.18em] text-sky-800">
+        {String(value)}
+      </span>
+    );
+  }
+
+  if (column === "cycle_number") {
+    return (
+      <span className="inline-flex min-w-[4.5rem] items-center justify-center rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700">
+        C{String(value)}
+      </span>
+    );
+  }
+
+  if (column === "_id" || /(^|_)id$/i.test(column)) {
+    return (
+      <span className="block min-w-[11rem] font-mono text-[11px] leading-5 text-slate-600 break-all">
+        {formatTableCellValue(value, 120)}
+      </span>
+    );
+  }
+
+  return (
+    <span className="block text-slate-700">
+      {formatTableCellValue(value)}
+    </span>
+  );
+};
+
+const getColumnClassName = (column) => {
+  if (column === "_id" || /(^|_)id$/i.test(column)) {
+    return "min-w-[13rem]";
+  }
+  if (column === "platform_number") {
+    return "min-w-[9rem]";
+  }
+  if (column === "cycle_number") {
+    return "min-w-[6rem]";
+  }
+  if (isLatitudeColumn(column) || isLongitudeColumn(column)) {
+    return "min-w-[9rem]";
+  }
+  if (isTimestampColumn(column)) {
+    return "min-w-[11rem]";
+  }
+  return "min-w-[8rem]";
+};
+
 // ─── Plotly Chart ─────────────────────────────────────────────────────────────
 
 const PlotlyRenderer = ({ plotly }) => {
@@ -207,34 +407,71 @@ const MetadataCard = ({ data }) => {
 const DataTable = ({ columns = [], rows = [] }) => {
   const [expanded, setExpanded] = useState(false);
   const visible = expanded ? rows : rows.slice(0, 8);
+  const hasCoordinates =
+    columns.some(isLatitudeColumn) && columns.some(isLongitudeColumn);
+  const hasTemporalColumn = columns.some(isTimestampColumn);
 
   if (!columns.length || !rows.length) return null;
 
   return (
-    <div className="mt-4 rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden">
-      <div className="bg-slate-700 px-4 py-2 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Layers className="w-4 h-4 text-slate-300" />
-          <span className="text-white text-sm font-bold">{rows.length} Records</span>
+    <div className="mt-4 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <div className="border-b border-slate-200 bg-[linear-gradient(135deg,#082f49_0%,#0f172a_55%,#164e63_100%)] px-4 py-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/10 ring-1 ring-white/15">
+              <Layers className="h-4 w-4 text-sky-200" />
+            </div>
+            <div>
+              <div className="text-sm font-semibold text-white">
+                Structured Result Table
+              </div>
+              <div className="mt-1 text-xs text-sky-100/80">
+                Showing {visible.length} of {rows.length} records
+              </div>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {hasTemporalColumn && (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/10 px-3 py-1 text-[11px] font-medium text-sky-50">
+                <Calendar className="h-3.5 w-3.5" />
+                Time in UTC
+              </span>
+            )}
+            {hasCoordinates && (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/10 px-3 py-1 text-[11px] font-medium text-sky-50">
+                <MapPin className="h-3.5 w-3.5" />
+                Coordinates as N/S, E/W
+              </span>
+            )}
+          </div>
         </div>
       </div>
-      <div className="overflow-x-auto max-h-56 overflow-y-auto">
-        <table className="w-full text-left border-collapse text-xs">
-          <thead className="bg-slate-50 sticky top-0">
+      <div className="max-h-80 overflow-auto bg-[radial-gradient(circle_at_top_left,_rgba(14,165,233,0.08),_transparent_32%),linear-gradient(180deg,#ffffff_0%,#f8fafc_100%)]">
+        <table className="min-w-full text-left text-xs">
+          <thead className="sticky top-0 z-10 bg-white/95 backdrop-blur">
             <tr>
               {columns.map(col => (
-                <th key={col} className="px-3 py-2 font-bold text-slate-600 uppercase tracking-wider whitespace-nowrap border-b border-slate-200">
-                  {col.replace(/_/g, " ")}
+                <th
+                  key={col}
+                  className={`border-b border-slate-200 px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 ${getColumnClassName(col)}`}
+                >
+                  {formatColumnLabel(col)}
                 </th>
               ))}
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {visible.map((row, i) => (
-              <tr key={i} className="hover:bg-slate-50 transition-colors">
+              <tr
+                key={i}
+                className="bg-white/80 transition-colors odd:bg-slate-50/55 hover:bg-sky-50/70"
+              >
                 {columns.map(col => (
-                  <td key={col} className="px-3 py-1.5 text-slate-700 whitespace-nowrap font-mono">
-                    {row[col] != null ? String(row[col]) : "—"}
+                  <td
+                    key={col}
+                    className={`px-4 py-3 align-top ${col === "_id" || /(^|_)id$/i.test(col) ? "border-r border-slate-100 pr-6" : ""}`}
+                  >
+                    {renderTableCell(col, row[col])}
                   </td>
                 ))}
               </tr>
@@ -245,7 +482,7 @@ const DataTable = ({ columns = [], rows = [] }) => {
       {rows.length > 8 && (
         <button
           onClick={() => setExpanded(!expanded)}
-          className="w-full py-2 text-xs text-sky-600 hover:bg-sky-50 flex items-center justify-center gap-1 border-t border-slate-100 transition-colors"
+          className="flex w-full items-center justify-center gap-1 border-t border-slate-200 bg-white py-2.5 text-xs font-medium text-sky-700 transition-colors hover:bg-sky-50"
         >
           {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
           {expanded ? "Show less" : `Show all ${rows.length} rows`}
@@ -275,15 +512,18 @@ const StatsCard = ({ param, platform, data }) => {
         </span>
       </div>
       <div className="grid grid-cols-4 divide-x divide-slate-100">
-        {stats.map(({ label, value, color, bg, icon: Icon }) => (
-          <div key={label} className={`flex flex-col items-center py-4 ${bg}`}>
-            <Icon className={`w-4 h-4 mb-1 ${color}`} />
-            <span className="text-xs font-medium text-slate-500">{label}</span>
-            <span className={`text-lg font-bold font-mono ${color}`}>
-              {value != null ? value.toFixed(3) : "—"}
-            </span>
-          </div>
-        ))}
+        {stats.map((stat) => {
+          const StatIcon = stat.icon;
+          return (
+            <div key={stat.label} className={`flex flex-col items-center py-4 ${stat.bg}`}>
+              <StatIcon className={`w-4 h-4 mb-1 ${stat.color}`} />
+              <span className="text-xs font-medium text-slate-500">{stat.label}</span>
+              <span className={`text-lg font-bold font-mono ${stat.color}`}>
+                {stat.value != null ? stat.value.toFixed(3) : "—"}
+              </span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

@@ -104,6 +104,7 @@ temp/
 # Environment files
 .env.development.local
 .env.test.local
+.env.template
 .env.production.local
 
 # Test coverage
@@ -120,6 +121,8 @@ htmlcov/
 *.iml
 .gradle/
 .idea/
+.codex
+.gitignore
 
 # Optional REPL history
 .node_repl_history
