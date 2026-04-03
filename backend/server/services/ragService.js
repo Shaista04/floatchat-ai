@@ -97,26 +97,11 @@ class RagService {
       this._classifyIntent(query, history),
     ]);
 
-    // Display intent classification decision
-    let intentMessage = "";
-    if (intent.tool === "generic_chat") {
-      intentMessage = "[ROUTING] Generic conversation (no data tools needed)";
-    } else if (
-      vectorContext.length > 0 &&
-      this.vectorService.status === "connected"
-    ) {
-      intentMessage = `[ROUTING] Hybrid: Using MCP tool '${intent.tool}' + Semantic search (${vectorContext.length} results)`;
-    } else if (this.vectorService.status === "unavailable") {
-      intentMessage = `[ROUTING] MongoDB-only: Using MCP tool '${intent.tool}'`;
-    } else {
-      intentMessage = `[ROUTING] Using MCP tool '${intent.tool}'`;
-    }
-    console.log(intentMessage);
-
+    console.log(
+      `[RAG] Intent: tool=${intent.tool}, llmConnected=${intent.llmConnected}`,
+    );
     if (vectorContext.length > 0) {
-      console.log(
-        `[RAG] Vector results: ${vectorContext.length} documents found`,
-      );
+      console.log(`[RAG] Vector results: ${vectorContext.length} documents`);
     }
 
     // ── 4. Execute MCP Tool (if not generic chat) ─────────────────────
@@ -171,10 +156,9 @@ class RagService {
         toolResult,
         vectorContext,
         history,
-        intentMessage,
       );
     } else {
-      answer = this._smartFallback(query, intent, toolResult, intentMessage);
+      answer = this._smartFallback(query, intent, toolResult);
     }
 
     // ── 6. Build & save response ──────────────────────────────────────
@@ -185,7 +169,6 @@ class RagService {
       code: toolCode,
       tool_used: intent.tool,
       tool_result: toolResult,
-      intent_info: intentMessage,
       timestamp: new Date(),
     };
 
@@ -494,7 +477,7 @@ SPECIFIC TOOL ROUTING:
   async _generateConversationalResponse(query, intent, vectorContext, history) {
     // If LLM already generated a response during classification
     if (intent.llmReasoning && intent.llmReasoning.trim().length > 10) {
-      return this._cleanLLMResponse(intent.llmReasoning);
+      return intent.llmReasoning;
     }
 
     // Try LLM for natural conversation
@@ -515,17 +498,19 @@ SPECIFIC TOOL ROUTING:
         const messages = [
           {
             role: "system",
-            content: `You are FloatChat-AI, an expert oceanographic data assistant specializing in ARGO float data from the Indian Ocean.
+            content: `You are FloatChat-AI, a friendly, knowledgeable, and thorough oceanographic data assistant. You specialize in ARGO float data from the Indian Ocean.
 
 You have access to ${dataSummary} in your database.
 
 RESPONSE GUIDELINES:
-- Respond directly and concisely to what the user asked
-- Provide medium-length responses (2-4 sentences per topic, 3-4 paragraphs total)
-- Use clear, plain language without excessive formatting
-- Focus on accuracy and relevance over elaboration
-- Reference specific ARGO data when relevant
-- Be helpful and professional${contextStr}`,
+- Give elaborate, detailed, scientifically accurate responses
+- When discussing ocean phenomena, provide context about why they matter
+- Use proper formatting with headers, bullet points, and emphasis
+- If the user asks about your capabilities, explain them comprehensively
+- Reference specific data from the ARGO Indian Ocean dataset when relevant
+- Maintain conversational context — remember what was discussed earlier
+- Suggest follow-up queries the user might find interesting
+- Be warm, helpful, and professional${contextStr}`,
           },
           ...history.slice(-6),
           { role: "user", content: query },
@@ -535,12 +520,10 @@ RESPONSE GUIDELINES:
           model: this.model,
           messages,
           temperature: 0.7,
-          max_tokens: 800,
+          max_tokens: 1500,
         });
 
-        const content =
-          response.choices[0]?.message?.content || this._defaultGreeting();
-        return this._cleanLLMResponse(content);
+        return response.choices[0]?.message?.content || this._defaultGreeting();
       } catch (e) {
         console.warn("[RAG] LLM conversational response failed:", e.message);
       }
@@ -560,25 +543,46 @@ RESPONSE GUIDELINES:
   ) {
     if (!toolResult) return this._smartFallback(query, intent, toolResult);
 
-    // Get structured data first
-    const structuredData = this._formatStructuredData(toolResult);
+    const dataContext = this._buildDataContext(toolResult);
 
-    // For data responses, return structured data instead of paragraph dump
-    // Add a brief LLM summary if available
-    if (
-      this.llm &&
-      toolResult?.type !== "plotly" &&
-      toolResult?.type !== "leaflet"
-    ) {
+    if (this.llm) {
       try {
+        let vectorStr = "";
+        if (vectorContext.length > 0) {
+          vectorStr =
+            "\n\nAdditional semantic search context:\n" +
+            vectorContext
+              .slice(0, 3)
+              .map((r) => `- ${r.document || r.id}`)
+              .join("\n");
+        }
+
         const messages = [
           {
             role: "system",
-            content: `You are FloatChat-AI. Provide a 1-2 sentence summary of this data query result. Be concise and factual.`,
+            content: `You are FloatChat-AI, an expert oceanographic data analyst providing comprehensive analysis of ARGO float data.
+
+You executed a tool and have real data to analyze. Provide a thorough, scientifically insightful response.
+
+RESPONSE GUIDELINES:
+- Give detailed, elaborate analysis — don't just state numbers, interpret them
+- For visualizations: describe what the chart/map reveals, identify patterns, and explain their oceanographic significance
+- For data: summarize key findings with specific numbers, compare to known ranges, note any anomalies
+- For statistics: interpret values in oceanographic context (e.g., "typical salinity for the Arabian Sea is 35-36 PSU")
+- Use proper markdown formatting with headers, bullet points, and emphasis
+- Include scientific context about the parameters being analyzed
+- Suggest related queries the user might want to explore next
+- Reference the specific tool used and parameters to show transparency
+- Maintain conversation context from previous messages`,
           },
+          ...history.slice(-4),
           {
             role: "user",
-            content: `Summarize this data result:\n${structuredData}`,
+            content: query,
+          },
+          {
+            role: "assistant",
+            content: `I executed the **${intent.tool}** tool with parameters: \`${JSON.stringify(intent.params)}\`\n\nResults:\n${dataContext}${vectorStr}\n\nNow I will provide a comprehensive analysis:`,
           },
         ];
 
@@ -586,7 +590,7 @@ RESPONSE GUIDELINES:
           model: this.model,
           messages,
           temperature: 0.4,
-          max_tokens: 200,
+          max_tokens: 2000,
         });
 
         const summary = response.choices[0]?.message?.content;
@@ -600,12 +604,11 @@ RESPONSE GUIDELINES:
           return `${this._cleanLLMResponse(summary)}\n\nData:\n${structuredData}`;
         }
       } catch (e) {
-        console.warn("[RAG] LLM summary generation failed:", e.message);
+        console.warn("[RAG] LLM synthesis failed:", e.message);
       }
     }
 
-    // Return structured data as-is if no LLM or LLM fails
-    return structuredData;
+    return this._smartFallback(query, intent, toolResult);
   }
 
   // ─── Build Data Context for LLM ────────────────────────────────────
@@ -707,14 +710,14 @@ RESPONSE GUIDELINES:
       const title = layout?.title?.text || tool.replace(/_/g, " ");
       const traces = toolResult?.plotly?.data || [];
       const n = traces.reduce((acc, t) => acc + (t.x?.length || 0), 0);
-      return `${title}\n\nGenerated a visualization with ${traces.length} data series containing ${n.toLocaleString()} data points from the ARGO Indian Ocean array.\n\nThe interactive chart is rendered above. You can hover over data points for detailed values, zoom in on regions of interest, and use the toolbar for additional options.`;
+      return `📊 **${title}**\n\nGenerated a visualization with ${traces.length} data series containing ${n.toLocaleString()} data points from the ARGO Indian Ocean array.\n\nThe interactive chart is rendered above. You can hover over data points for detailed values, zoom in on regions of interest, and use the toolbar for additional options.`;
     }
 
     if (type === "leaflet") {
       const markers = toolResult?.markers || [];
-      let text = `Float Map — ${markers.length} locations\n\nDisplaying ${markers.length} float position${markers.length !== 1 ? "s" : ""} from the ARGO Indian Ocean array.`;
+      let text = `🗺️ **Float Map — ${markers.length} locations**\n\nDisplaying ${markers.length} float position${markers.length !== 1 ? "s" : ""} from the ARGO Indian Ocean array.`;
       if (toolResult?.polyline) {
-        text += `\n\nThe trajectory path spans ${toolResult.polyline.length} waypoints, showing the float's journey through the ocean. Click on markers to see cycle details.`;
+        text += `\n\nThe trajectory path spans **${toolResult.polyline.length} waypoints**, showing the float's journey through the ocean. Click on markers to see cycle details.`;
       }
       return text;
     }
@@ -722,15 +725,15 @@ RESPONSE GUIDELINES:
     if (type === "metadata_card") {
       const d = toolResult.data || {};
       return (
-        `Float Metadata — Platform ${d.platform_number || "?"}\n\n` +
+        `🃏 **Float Metadata — Platform ${d.platform_number || "?"}**\n\n` +
         `Here is the complete technical profile for this ARGO float:\n\n` +
-        `Project: ${d.project_name || "—"}\n` +
-        `Principal Investigator: ${d.pi_name || "—"}\n` +
-        `Platform Type: ${d.platform_type || "—"}\n` +
-        `Total Cycles Completed: ${d.total_cycles || "—"}\n` +
-        `BGC Capabilities: ${d.has_bgc ? "Yes (carries biogeochemical sensors)" : "No (core parameters only: T, S, P)"}\n` +
-        `First Observation: ${d.first_date ? new Date(d.first_date).toLocaleDateString() : "—"}\n` +
-        `Latest Observation: ${d.last_date ? new Date(d.last_date).toLocaleDateString() : "—"}\n\n` +
+        `• **Project:** ${d.project_name || "—"}\n` +
+        `• **Principal Investigator:** ${d.pi_name || "—"}\n` +
+        `• **Platform Type:** ${d.platform_type || "—"}\n` +
+        `• **Total Cycles Completed:** ${d.total_cycles || "—"}\n` +
+        `• **BGC Capabilities:** ${d.has_bgc ? "Yes ✓ (carries biogeochemical sensors)" : "No (core parameters only: T, S, P)"}\n` +
+        `• **First Observation:** ${d.first_date ? new Date(d.first_date).toLocaleDateString() : "—"}\n` +
+        `• **Latest Observation:** ${d.last_date ? new Date(d.last_date).toLocaleDateString() : "—"}\n\n` +
         `The detailed metadata card is displayed above.`
       );
     }
@@ -738,12 +741,12 @@ RESPONSE GUIDELINES:
     if (type === "stats_card") {
       const d = toolResult.data || {};
       return (
-        `${toolResult.param || ""} Statistics${toolResult.platform ? ` — Platform ${toolResult.platform}` : ""}\n\n` +
-        `Mean: ${d.mean?.toFixed(4) ?? "—"}\n` +
-        `Standard Deviation: ${d.std?.toFixed(4) ?? "—"}\n` +
-        `Minimum: ${d.min?.toFixed(4) ?? "—"}\n` +
-        `Maximum: ${d.max?.toFixed(4) ?? "—"}\n` +
-        `Total Measurements: ${d.count?.toLocaleString() ?? "—"}\n\n` +
+        `📈 **${toolResult.param || ""} Statistics${toolResult.platform ? ` — Platform ${toolResult.platform}` : ""}**\n\n` +
+        `• **Mean:** ${d.mean?.toFixed(4) ?? "—"}\n` +
+        `• **Standard Deviation:** ${d.std?.toFixed(4) ?? "—"}\n` +
+        `• **Minimum:** ${d.min?.toFixed(4) ?? "—"}\n` +
+        `• **Maximum:** ${d.max?.toFixed(4) ?? "—"}\n` +
+        `• **Total Measurements:** ${d.count?.toLocaleString() ?? "—"}\n\n` +
         `The statistics card is displayed above for quick reference.`
       );
     }
@@ -752,7 +755,7 @@ RESPONSE GUIDELINES:
       const rows = toolResult.rows || [];
       if (rows.length === 0)
         return "No float data matched your query. Try widening your date range or geographic region.";
-      return `Data Table — ${rows.length} records\n\nFound ${rows.length} ARGO float records matching your query. The interactive table is displayed above — you can scroll through all records and expand for more.`;
+      return `📋 **Data Table — ${rows.length} records**\n\nFound ${rows.length} ARGO float records matching your query. The interactive table is displayed above — you can scroll through all records and expand for more.`;
     }
 
     if (type === "text") {
@@ -761,15 +764,15 @@ RESPONSE GUIDELINES:
 
     if (type === "data" && Array.isArray(data)) {
       if (data.length === 0) {
-        return `I searched using the ${tool.replace(/_/g, " ")} tool but found 0 matching records. Try:\n- A wider date range\n- A larger geographic region\n- A different platform number`;
+        return `I searched using the **${tool.replace(/_/g, " ")}** tool but found 0 matching records. Try:\n• A wider date range\n• A larger geographic region\n• A different platform number`;
       }
       const sample = data[0];
-      let intro = `Found ${data.length} ARGO record${data.length !== 1 ? "s" : ""} for your query.\n\n`;
+      let intro = `Found **${data.length}** ARGO record${data.length !== 1 ? "s" : ""} for your query.\n\n`;
       if (sample.platform_number) {
         const platforms = [
           ...new Set(data.map((d) => d.platform_number).filter(Boolean)),
         ];
-        intro += `Platforms: ${platforms.slice(0, 8).join(", ")}${platforms.length > 8 ? ` +${platforms.length - 8} more` : ""}`;
+        intro += `**Platforms:** ${platforms.slice(0, 8).join(", ")}${platforms.length > 8 ? ` +${platforms.length - 8} more` : ""}`;
       }
       return intro;
     }
@@ -782,50 +785,51 @@ RESPONSE GUIDELINES:
     ) {
       if (data.activeFloats != null) {
         return (
-          `ARGO Indian Ocean Dataset Summary\n\n` +
-          `Active Floats: ${data.activeFloats.toLocaleString()}\n` +
-          `Total Profiles: ${data.total_profiles?.toLocaleString() || "—"}\n` +
-          `BGC Profiles: ${data.total_bgc_profiles?.toLocaleString() || "—"}\n` +
-          `BGC Coverage: ${data.bgcCoverage || "—"}\n\n` +
+          `📊 **ARGO Indian Ocean Dataset Summary**\n\n` +
+          `• **Active Floats:** ${data.activeFloats.toLocaleString()}\n` +
+          `• **Total Profiles:** ${data.total_profiles?.toLocaleString() || "—"}\n` +
+          `• **BGC Profiles:** ${data.total_bgc_profiles?.toLocaleString() || "—"}\n` +
+          `• **BGC Coverage:** ${data.bgcCoverage || "—"}\n\n` +
           `This dataset covers floats deployed across the Indian Ocean basin, collecting temperature, salinity, and pressure data through autonomous profiling.`
         );
       }
-      return `Data retrieved:\n\n\`\`\`json\n${JSON.stringify(data, null, 2).substring(0, 600)}\n\`\`\``;
+      return `📊 Data retrieved:\n\n\`\`\`json\n${JSON.stringify(data, null, 2).substring(0, 600)}\n\`\`\``;
     }
 
     if (tool === "generic_chat") {
       return this._defaultGreeting();
     }
 
-    return `I processed your query using the ${tool.replace(/_/g, " ")} tool. ${toolResult?.error ? `\n\nError: ${toolResult.error}` : ""}`;
+    return `I processed your query using the **${tool.replace(/_/g, " ")}** tool. ${toolResult?.error ? `\n\n⚠️ Error: ${toolResult.error}` : ""}`;
   }
 
   // ─── Helpers ────────────────────────────────────────────────────────
 
   _defaultGreeting() {
     return (
-      "Hello! I'm FloatChat-AI, your oceanographic data assistant.\n\n" +
-      "I specialize in exploring and analyzing ARGO float data from the Indian Ocean. I can help you with:\n\n" +
-      "Data Exploration\n" +
+      "👋 Hello! I'm **FloatChat-AI**, your expert oceanographic data assistant.\n\n" +
+      "I specialize in exploring and analyzing **ARGO float data** from the Indian Ocean — one of the most extensive ocean observation systems in the world. " +
+      "I can help you with:\n\n" +
+      "🔍 **Data Exploration**\n" +
       "• Search for floats by region, date, or platform number\n" +
       "• View detailed metadata cards for specific floats\n" +
       "• Browse data tables with filtering\n\n" +
-      "Visualizations\n" +
-      "• Temperature and salinity depth profiles\n" +
-      "• T-S diagrams for water mass analysis\n" +
+      "📊 **Visualizations**\n" +
+      "• Temperature & salinity depth profiles\n" +
+      "• T-S (Temperature-Salinity) diagrams for water mass analysis\n" +
       "• Heatmaps showing parameter variation across depth and time\n" +
       "• Time series of oceanographic parameters\n\n" +
-      "Maps\n" +
+      "🗺️ **Maps**\n" +
       "• Float trajectory tracking\n" +
       "• Regional float distribution maps\n\n" +
-      "Analytics\n" +
+      "📈 **Analytics**\n" +
       "• Statistical summaries (mean, std, min, max)\n" +
       "• Regional comparisons\n\n" +
       "Try asking me something like:\n" +
-      "• Tell me about float 2902277\n" +
-      "• Show temperature depth profile for float 1900121\n" +
-      "• Show trajectory of float 2902277\n" +
-      "• What floats are in the Arabian Sea?"
+      '• *"Tell me about float 2902277"*\n' +
+      '• *"Show temperature depth profile for float 1900121"*\n' +
+      '• *"Show trajectory of float 2902277"*\n' +
+      '• *"What floats are in the Arabian Sea?"*'
     );
   }
 
@@ -945,9 +949,9 @@ RESPONSE GUIDELINES:
   _selectTabularColumns(rows, maxColumns = 8) {
     if (!Array.isArray(rows) || rows.length === 0) return [];
 
-    const sample = rows.slice(0, 20).filter(
-      (row) => row && typeof row === "object" && !Array.isArray(row),
-    );
+    const sample = rows
+      .slice(0, 20)
+      .filter((row) => row && typeof row === "object" && !Array.isArray(row));
     if (!sample.length) return [];
 
     const allKeys = [...new Set(sample.flatMap((row) => Object.keys(row)))];
@@ -1098,14 +1102,12 @@ RESPONSE GUIDELINES:
         return "No records found";
       }
       const cols = toolResult.columns || Object.keys(rows[0] || {});
-      const preview = rows
-        .slice(0, 3)
-        .map((row) =>
-          cols
-            .slice(0, 4)
-            .map((c) => `${c}=${this._formatCellValue(row[c], 24)}`)
-            .join(", "),
-        );
+      const preview = rows.slice(0, 3).map((row) =>
+        cols
+          .slice(0, 4)
+          .map((c) => `${c}=${this._formatCellValue(row[c], 24)}`)
+          .join(", "),
+      );
       return [
         `Found ${rows.length} records.`,
         `Columns: ${cols.join(", ")}`,

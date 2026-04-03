@@ -144,27 +144,15 @@ class MongoService {
   }
 
   async profilesByRegion(latMin, latMax, lonMin, lonMax, limit = 200) {
-    // Validate and clamp geographic boundaries to valid ranges
-    const lat_min = Math.max(-90, Math.min(90, +latMin));
-    const lat_max = Math.max(-90, Math.min(90, +latMax));
-    const lon_min = Math.max(-180, Math.min(180, +lonMin));
-    const lon_max = Math.max(-180, Math.min(180, +lonMax));
-
-    // Ensure min <= max
-    const latBounds =
-      lat_min > lat_max ? [lat_max, lat_min] : [lat_min, lat_max];
-    const lonBounds =
-      lon_min > lon_max ? [lon_max, lon_min] : [lon_min, lon_max];
-
     return this.db
       .collection("profiles")
       .find({
-        latitude: { $gte: latBounds[0], $lte: latBounds[1] },
-        longitude: { $gte: lonBounds[0], $lte: lonBounds[1] },
+        latitude: { $gte: latMin, $lte: latMax },
+        longitude: { $gte: lonMin, $lte: lonMax },
       })
       .project({ measurements: 0 })
       .sort({ timestamp: -1 })
-      .limit(Math.min(limit, 1000)) // Cap at 1000 to prevent excessive memory use
+      .limit(limit)
       .toArray();
   }
 
@@ -175,11 +163,10 @@ class MongoService {
 
     const filter = {
       timestamp: {
-        $gte: start,
-        $lt: end, // Use $lt instead of $lte to avoid double-counting on day boundaries
+        $gte: new Date(dateStart),
+        $lte: new Date(dateEnd),
       },
     };
-
     if (bbox) {
       const latBounds = this._normalizeBounds(
         bbox.lat_min,
@@ -230,27 +217,15 @@ class MongoService {
   }
 
   async bgcProfilesByRegion(latMin, latMax, lonMin, lonMax, limit = 200) {
-    // Validate and clamp geographic boundaries
-    const lat_min = Math.max(-90, Math.min(90, +latMin));
-    const lat_max = Math.max(-90, Math.min(90, +latMax));
-    const lon_min = Math.max(-180, Math.min(180, +lonMin));
-    const lon_max = Math.max(-180, Math.min(180, +lonMax));
-
-    // Ensure min <= max
-    const latBounds =
-      lat_min > lat_max ? [lat_max, lat_min] : [lat_min, lat_max];
-    const lonBounds =
-      lon_min > lon_max ? [lon_max, lon_min] : [lon_min, lon_max];
-
     return this.db
       .collection("bgc_profiles")
       .find({
-        latitude: { $gte: latBounds[0], $lte: latBounds[1] },
-        longitude: { $gte: lonBounds[0], $lte: lonBounds[1] },
+        latitude: { $gte: latMin, $lte: latMax },
+        longitude: { $gte: lonMin, $lte: lonMax },
       })
       .project({ measurements: 0 })
       .sort({ timestamp: -1 })
-      .limit(Math.min(limit, 1000))
+      .limit(limit)
       .toArray();
   }
 
